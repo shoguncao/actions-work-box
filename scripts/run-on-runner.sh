@@ -7,12 +7,13 @@ usage() {
   cat <<'EOF'
 用法：run-on-runner.sh --repo OWNER/REPO --ref BRANCH --pat-file FILE
                        --ssh-key FILE --task-dir DIR --output-dir DIR
+                       --close-tunnel auto|manual
                        [--startup-timeout SEC] [--cleanup-timeout SEC]
 
 每轮触发一次 cloudflare-ssh workflow，SSH 上传任务目录、前台执行 entry.sh、
-取回 output/，关闭隧道并确认本轮 run 完成。每轮目录独立，结果互不覆盖。
+取回 output/，再按 --close-tunnel 决定关闭或保留隧道。每轮目录独立，结果互不覆盖。
 
-必填：--repo --ref --pat-file --ssh-key --task-dir --output-dir
+必填：--repo --ref --pat-file --ssh-key --task-dir --output-dir --close-tunnel
 可选：--startup-timeout（默认 600）--cleanup-timeout（默认 180）--help
 
   --repo            owner/repo，需启用 Actions
@@ -21,6 +22,8 @@ usage() {
   --ssh-key         登录 runner 的 SSH 私钥；公钥由它推导后作为 input 传入
   --task-dir        任务目录，需含 entry.sh
   --output-dir      结果根目录，本轮结果在其 <关联标识> 子目录
+  --close-tunnel    auto：执行 pkill -x cloudflared 关闭隧道并确认 run completed
+                    manual：保留隧道，脚本不取消本轮 run，需自行连接并关闭
 
 任务目录：entry.sh 前台执行，结果写入 output/；输入里已有的 output/ 不上传；
 output/ 为空属正常；依赖安装与后台任务 wait 由 entry.sh 自己负责。
@@ -31,14 +34,14 @@ EOF
 die()  { echo "错误：$*" >&2; usage >&2; exit 2; }   # 参数错误
 fail() { echo "错误：$*" >&2; exit 1; }               # 运行期错误
 
-REPO=""; REF=""; PAT_FILE=""; SSH_KEY=""; TASK_DIR=""; OUTPUT_DIR=""
+REPO=""; REF=""; PAT_FILE=""; SSH_KEY=""; TASK_DIR=""; OUTPUT_DIR=""; CLOSE_TUNNEL=""
 STARTUP_TIMEOUT=600; CLEANUP_TIMEOUT=180
 
 # 参数去掉 -- 后大写、连字符转下划线，正好就是上面的变量名
 while [ $# -gt 0 ]; do
   case "$1" in
     --help) usage; exit 0 ;;
-    --repo|--ref|--pat-file|--ssh-key|--task-dir|--output-dir|--startup-timeout|--cleanup-timeout)
+    --repo|--ref|--pat-file|--ssh-key|--task-dir|--output-dir|--close-tunnel|--startup-timeout|--cleanup-timeout)
       [ $# -ge 2 ] || die "$1 缺少值"
       name=$(printf '%s' "${1#--}" | tr 'a-z-' 'A-Z_')
       printf -v "$name" '%s' "$2"
@@ -47,9 +50,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-for v in REPO REF PAT_FILE SSH_KEY TASK_DIR OUTPUT_DIR; do
+for v in REPO REF PAT_FILE SSH_KEY TASK_DIR OUTPUT_DIR CLOSE_TUNNEL; do
   [ -n "${!v}" ] || die "缺少必填参数 $v"
 done
+case "$CLOSE_TUNNEL" in
+  auto|manual) ;;
+  *) die "--close-tunnel 只能是 auto 或 manual" ;;
+esac
 for c in curl ssh tar python3 cloudflared; do
   command -v "$c" >/dev/null 2>&1 || die "缺少依赖 $c"
 done
@@ -96,7 +103,11 @@ cancel_run() {
   [ -n "$RUN_ID" ] && api -X POST "$API/repos/$REPO/actions/runs/$RUN_ID/cancel" >/dev/null 2>&1
   return 0
 }
-trap 'log "收到中断，取消本轮"; cancel_run; exit 130' INT TERM HUP
+if [ "$CLOSE_TUNNEL" = auto ]; then
+  trap 'log "收到中断，取消本轮"; cancel_run; exit 130' INT TERM HUP
+else
+  trap 'log "收到中断，隧道保留，请自行关闭"; exit 130' INT TERM HUP
+fi
 
 run_done() {
   local info
@@ -224,16 +235,23 @@ log "取回 output/"
 ssh_do "cd '$REMOTE_DIR' && tar -cf - -C output ." | tar -xf - -C "$RESULT_DIR" || down=0
 [ "$down" -eq 1 ] || echo "错误：结果下载失败" >&2
 
-# ---------- 收尾：关隧道让 wait 返回、job 绿色结束，再确认 completed ----------
-log "关闭隧道"
-ssh_do 'pkill -x cloudflared' >/dev/null 2>&1 || true
+# ---------- 收尾 ----------
+if [ "$CLOSE_TUNNEL" = auto ]; then
+  log "关闭隧道"
+  ssh_do 'pkill -x cloudflared' >/dev/null 2>&1 || true
 
-deadline=$((SECONDS + CLEANUP_TIMEOUT))
-while [ "$SECONDS" -lt "$deadline" ]; do
-  run_done && { done_ok=1; break; }
-  sleep 3
-done
-[ "$done_ok" -eq 1 ] || { echo "错误：${CLEANUP_TIMEOUT}s 内未完成" >&2; cancel_run; }
+  deadline=$((SECONDS + CLEANUP_TIMEOUT))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    run_done && { done_ok=1; break; }
+    sleep 3
+  done
+  [ "$done_ok" -eq 1 ] || { echo "错误：${CLEANUP_TIMEOUT}s 内未完成" >&2; cancel_run; }
+else
+  done_ok=1
+  log "保留隧道，本轮不自动关闭；请自行执行："
+  log "ssh -i $SSH_KEY -o ProxyCommand='cloudflared access tcp --hostname $TUNNEL_URL' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $SSH_TARGET"
+  log "进入后执行 pkill -x cloudflared 关闭；或在 Actions 页面 Cancel。run 仍受 360 分钟上限约束。"
+fi
 
 # 下载或收尾失败则整体非零，否则如实返回业务退出码
 if [ "$down" -ne 1 ] || [ "$done_ok" -ne 1 ]; then

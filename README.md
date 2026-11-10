@@ -79,7 +79,8 @@ my-task/
   --pat-file ~/.config/actions-work-box/pat.txt \
   --ssh-key /path/to/action-sshd-cloudflared \
   --task-dir /path/to/my-task \
-  --output-dir /path/to/results
+  --output-dir /path/to/results \
+  --close-tunnel auto
 ```
 
 ```bash
@@ -87,16 +88,20 @@ my-task/
   --repo shoguncao/actions-work-box --ref main \
   --pat-file ~/.config/actions-work-box/pat.txt \
   --task-dir /path/to/my-task \
-  --output-dir /path/to/results
+  --output-dir /path/to/results \
+  --close-tunnel auto
 ```
 
+- `--close-tunnel`（**必填**）：`auto` 由脚本执行 `pkill -x cloudflared` 关闭隧道并确认 run 变为 completed；`manual` 保留隧道，脚本不关闭、不取消本轮 run，需自行连接后执行 `pkill -x cloudflared`，或在 Actions 页面 Cancel。
 - `--startup-timeout`（默认 600 秒）：等本轮 run 与隧道地址就绪的上限。
-- `--cleanup-timeout`（默认 180 秒）：等本轮 run 变为 completed 的上限。
+- `--cleanup-timeout`（默认 180 秒）：仅 `auto` 模式使用，等本轮 run 变为 completed 的上限。
 - `--help` 查看两个脚本的完整参数说明。
 
 ### 行为约定
 
-- 严格顺序：触发 → 等就绪 → 上传 → 执行并等待真实退出 → 下载输出 → 收尾并确认 completed → 单轮返回 → 下一轮。正常路径不会在业务仍运行时提前收尾。
+- 严格顺序：触发 → 等就绪 → 上传 → 执行并等待真实退出 → 下载输出 → 收尾 → 单轮返回 → 下一轮。正常路径不会在业务仍运行时提前收尾。
+- `--close-tunnel auto`：关隧道、等 completed 后才返回；收到中断会取消本轮 run，退出时删除循环脚本生成的临时密钥。
+- `--close-tunnel manual`：下载结果后立即返回，run 保持 in_progress，隧道继续存活（直到 workflow 的 360 分钟上限）；日志会打印完整连接命令，循环脚本**不会删除临时密钥**以便你连上去手动关闭，用完请自行删除该目录。此模式下收到中断也不会取消 run。若 `--count` 大于 1，会依次留下多个存活的 run，需要逐个关闭。
 - 退出码：业务成功且上传、下载、收尾都成功返回 0；`entry.sh` 非零退出时仍尝试取回 `output/`，业务退出码如实返回；SSH 断连、下载失败、未在期限内完成都会让整体非零，日志分别记录业务结果与基础设施结果。
 - 异常与信号：只对已识别的本轮 run 尽力收尾，不会取消其它运行；dispatch 结果不确定时先按关联标识查状态，不盲目重发。
 - 隧道地址拿到后，先用 Cloudflare 的 DoH 接口等权威 DNS 登记好这个新域名（最多 60 秒），本机才第一次去解析它。这样内网 DNS 不会记下 NXDOMAIN 负缓存——那份负缓存会让后续每次解析都白等约 60 秒。登记完成后再用一次空 SSH 命令探活（最多 90 秒），通过才上传任务目录。任一环节失败都会取消本轮 run 并整体非零退出。
