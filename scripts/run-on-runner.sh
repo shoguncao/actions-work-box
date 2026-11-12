@@ -58,7 +58,7 @@ case "$CLOSE_TUNNEL" in
   *) die "--close-tunnel 只能是 auto 或 manual" ;;
 esac
 for c in curl ssh tar python3 cloudflared; do
-  command -v "$c" >/dev/null 2>&1 || die "缺少依赖 $c"
+  command -v "$c" || die "缺少依赖 $c"
 done
 [ -r "$PAT_FILE" ] || die "PAT 文件不可读"
 [ -r "$SSH_KEY" ] || die "SSH 私钥不可读"
@@ -100,7 +100,7 @@ api() {
 http_code() { cat "$TMP_DIR/code"; }
 
 cancel_run() {
-  [ -n "$RUN_ID" ] && api -X POST "$API/repos/$REPO/actions/runs/$RUN_ID/cancel" >/dev/null 2>&1
+  [ -n "$RUN_ID" ] && api -X POST "$API/repos/$REPO/actions/runs/$RUN_ID/cancel"
   return 0
 }
 if [ "$CLOSE_TUNNEL" = auto ]; then
@@ -154,7 +154,7 @@ print("\n".join(str(r["id"]) for r in runs
 
 # ---------- 触发本轮 workflow ----------
 CID="awb-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
-SSH_PUBKEY=$(ssh-keygen -y -P '' -f "$SSH_KEY" 2>/dev/null) || fail "无法从私钥推导公钥"
+SSH_PUBKEY=$(ssh-keygen -y -P '' -f "$SSH_KEY") || fail "无法从私钥推导公钥"
 DISPATCH_BODY=$(python3 -c 'import json,sys; print(json.dumps({"ref":sys.argv[1],"inputs":{"correlation_id":sys.argv[2],"ssh_pubkey":sys.argv[3]}}))' "$REF" "$CID" "$SSH_PUBKEY")
 
 log "触发 workflow，关联标识=$CID"
@@ -203,14 +203,14 @@ host=${TUNNEL_URL#https://}
 deadline=$((SECONDS + 60))
 until curl -fsS --max-time 6 -H 'accept: application/dns-json' \
     "https://cloudflare-dns.com/dns-query?name=$host&type=A" |
-    python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(a.get("type")==1 for a in d.get("Answer",[])) else 1)' 2>/dev/null; do
+    python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(a.get("type")==1 for a in d.get("Answer",[])) else 1)'; do
   [ "$SECONDS" -lt "$deadline" ] || { cancel_run; fail "域名 60s 内未生效"; }
   sleep 2
 done
 
 log "等待隧道就绪"
 deadline=$((SECONDS + 90))
-until ssh_do true >/dev/null 2>&1; do
+until ssh_do true; do
   [ "$SECONDS" -lt "$deadline" ] || { cancel_run; fail "隧道域名 90s 内未生效"; }
   sleep 3
 done
@@ -238,7 +238,7 @@ ssh_do "cd '$REMOTE_DIR' && tar -cf - -C output ." | tar -xf - -C "$RESULT_DIR" 
 # ---------- 收尾 ----------
 if [ "$CLOSE_TUNNEL" = auto ]; then
   log "关闭隧道"
-  ssh_do 'pkill -x cloudflared' >/dev/null 2>&1 || true
+  ssh_do 'pkill -x cloudflared' || true
 
   deadline=$((SECONDS + CLEANUP_TIMEOUT))
   while [ "$SECONDS" -lt "$deadline" ]; do

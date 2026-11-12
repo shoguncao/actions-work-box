@@ -37,9 +37,9 @@ jobs:
 
           {
             echo 'deb [trusted=yes] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
-            sudo apt-get update -qq 2>/dev/null
-            sudo apt-get install -y cloudflared 2>/dev/null || { echo "cloudflared installation failed" >&2; exit 1; }
-          } >/dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y cloudflared || { echo "cloudflared installation failed" >&2; exit 1; }
+          }
           cloudflared tunnel --no-autoupdate --url tcp://localhost:2222 > cloudflared.log 2>&1 &
           cf_pid=$!
 
@@ -58,7 +58,7 @@ jobs:
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
-              -d "$payload" > /dev/null
+              -d "$payload"
           fi
           echo "Install cloudflared locally, then replace the private key path in this command:"
           echo "ssh -i /path/to/action-sshd-cloudflared -o ProxyCommand='cloudflared access tcp --hostname $url' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null runner@github-actions"
