@@ -40,16 +40,23 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y cloudflared || { echo "cloudflared installation failed" >&2; exit 1; }
           }
-          cloudflared tunnel --no-autoupdate --url tcp://localhost:2222 > cloudflared.log 2>&1 &
+          : > cloudflared.log
+          tail -f cloudflared.log >&2 &
+          cloudflared tunnel --no-autoupdate --url tcp://localhost:2222 >> cloudflared.log 2>&1 &
           cf_pid=$!
 
           url=""
           for i in $(seq 1 60); do
-            url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' cloudflared.log | head -1 || true)
+            url=$(grep -oE 'https://[a-zA-Z0-9]+(-[a-zA-Z0-9]+)+\.trycloudflare\.com' cloudflared.log | head -1 || true)
             [ -n "$url" ] && break
+            if ! kill -0 "$cf_pid"; then
+              echo "cloudflared 已退出且未拿到隧道地址" >&2
+              cat cloudflared.log >&2
+              exit 1
+            fi
             sleep 1
           done
-          [ -n "$url" ] || { cat cloudflared.log >&2; exit 1; }
+          [ -n "$url" ] || { echo "60s 内未读到 Quick Tunnel 域名" >&2; cat cloudflared.log >&2; exit 1; }
 
           echo "Tunnel URL: $url"
           if [ -n "$CORRELATION_ID" ]; then
